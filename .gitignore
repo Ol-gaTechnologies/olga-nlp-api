@@ -1,0 +1,12 @@
+# .NET build output
+**/[Bb]in/
+**/[Oo]bj/
+
+# IDE and user-specific files
+.vs/
+*.user
+*.suo
+
+# Test results
+TestResults/
+*.trx

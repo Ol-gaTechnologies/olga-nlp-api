@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker"><PropertyGroup><AssemblyName>Olga.Nlp.Worker</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="..\Olga.Nlp.Infrastructure\Olga.Nlp.Infrastructure.csproj" /></ItemGroup></Project>

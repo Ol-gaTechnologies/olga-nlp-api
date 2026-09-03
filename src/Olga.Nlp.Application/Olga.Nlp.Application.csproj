@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><AssemblyName>Olga.Nlp.Application</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="..\Olga.Nlp.Domain\Olga.Nlp.Domain.csproj" /><ProjectReference Include="..\Olga.Nlp.Contracts\Olga.Nlp.Contracts.csproj" /></ItemGroup></Project>

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -12,6 +13,7 @@ public sealed class PiiChecker : IPiiChecker
     public bool ContainsPii(string text) => Pii.IsMatch(text);
     public string Mask(string text) => Pii.Replace(text, "[REDACTED]");
 }
+
 public sealed class TextNormalizer(IPiiChecker pii) : ITextNormalizer
 {
     public NormalizedText Normalize(string text, string? requestedLanguage = null)
@@ -23,23 +25,93 @@ public sealed class TextNormalizer(IPiiChecker pii) : ITextNormalizer
         return new(text, value, requestedLanguage ?? "en", hash, pii.ContainsPii(text));
     }
 }
+
 public sealed class FakeEmbeddingProvider : IEmbeddingProvider
 {
-    public string ModelVersion => "fake-embedding-v1";
-    public Task<float[]> EmbedAsync(string text, CancellationToken ct) { var v = new float[32]; foreach (var word in Regex.Matches(text.ToLowerInvariant(), "[a-z0-9]+")) v[Math.Abs(word.Value.GetHashCode()) % v.Length] += 1; var norm = MathF.Sqrt(v.Sum(x => x * x)); if (norm > 0) for (var i = 0; i < v.Length; i++) v[i] /= norm; return Task.FromResult(v); }
+    private static readonly Dictionary<string, string> Concepts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["temperature"] = "coldchain", ["controlled"] = "coldchain", ["cold"] = "coldchain", ["chain"] = "coldchain",
+        ["pharma"] = "pharmaceutical", ["medicine"] = "pharmaceutical", ["healthcare"] = "pharmaceutical",
+        ["warehouse"] = "storage", ["warehousing"] = "storage", ["logistics"] = "distribution", ["distributor"] = "distribution"
+    };
+
+    public string ModelVersion => "fake-embedding-v2";
+
+    public Task<float[]> EmbedAsync(string text, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var vector = new float[128];
+        foreach (Match match in Regex.Matches(text.ToLowerInvariant(), "[a-z0-9]+", RegexOptions.CultureInvariant))
+        {
+            var token = Concepts.TryGetValue(match.Value, out var concept) ? concept : match.Value;
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+            var index = BinaryPrimitives.ReadUInt16LittleEndian(hash) % vector.Length;
+            vector[index] += (hash[2] & 1) == 0 ? 1 : -1;
+        }
+        var norm = MathF.Sqrt(vector.Sum(x => x * x));
+        if (norm > 0) for (var i = 0; i < vector.Length; i++) vector[i] /= norm;
+        return Task.FromResult(vector);
+    }
 }
-public sealed class LocalEmbeddingProvider : IEmbeddingProvider { private readonly FakeEmbeddingProvider inner = new(); public string ModelVersion => "local-placeholder-v1"; public Task<float[]> EmbedAsync(string text, CancellationToken ct) => inner.EmbedAsync(text, ct); }
-public sealed class AzureEmbeddingProvider : IEmbeddingProvider { public string ModelVersion => "azure-configured-v1"; public Task<float[]> EmbedAsync(string text, CancellationToken ct) => throw new NotSupportedException("Configure the Azure provider adapter before enabling it."); }
+
+public sealed class LocalEmbeddingProvider : IEmbeddingProvider
+{
+    private readonly FakeEmbeddingProvider inner = new();
+    public string ModelVersion => "local-placeholder-v1";
+    public Task<float[]> EmbedAsync(string text, CancellationToken ct) => inner.EmbedAsync(text, ct);
+}
+
+public sealed class AzureEmbeddingProvider : IEmbeddingProvider
+{
+    public string ModelVersion => "azure-not-configured";
+    public Task<float[]> EmbedAsync(string text, CancellationToken ct) => throw new NotSupportedException("Configure Azure OpenAI before selecting this provider.");
+}
+
 public sealed class ReciprocalScorer : IReciprocalScorer
 {
-    public PairScore Score(float[] requesterNeed, float[] candidateOffer, float[] candidateNeed, float[] requesterOffer) { var f = Cos(requesterNeed, candidateOffer); var r = Cos(candidateNeed, requesterOffer); var reciprocal = f + r == 0 ? 0 : 2 * f * r / (f + r); return new(f, r, reciprocal, 0.5, 1); }
-    private static double Cos(float[] a, float[] b) => Math.Clamp(a.Zip(b).Sum(x => x.First * x.Second), 0, 1);
+    public PairScore Score(float[] requesterWant, float[] candidateOffer, float[]? candidateWant, float[]? requesterOffer)
+    {
+        var forward = Cosine(requesterWant, candidateOffer);
+        double? reverse = candidateWant is not null && requesterOffer is not null ? Cosine(candidateWant, requesterOffer) : null;
+        var reciprocal = reverse is null ? forward : HarmonicMean(forward, reverse.Value);
+        return new(forward, reverse, reciprocal, reciprocal);
+    }
+
+    private static double HarmonicMean(double a, double b) => a + b <= 0 ? 0 : 2 * a * b / (a + b);
+    private static double Cosine(float[] a, float[] b)
+    {
+        if (a.Length != b.Length) throw new ArgumentException("EMBEDDING_DIMENSION_MISMATCH");
+        return Math.Clamp(a.Zip(b).Sum(x => x.First * x.Second), 0, 1);
+    }
 }
+
 public sealed class ExplanationGenerator : IExplanationGenerator
 {
-    public (IReadOnlyList<string> Codes, string Text) Explain(Intent requester, Candidate candidate, PairScore score) => score.Reciprocal < .35 ? (Array.Empty<string>(), "") : (new[] { "SEMANTIC_RECIPROCAL" }, $"This member's offer is relevant to the requesting intent, with reciprocal relevance of {score.Reciprocal:0.00}.");
+    public (IReadOnlyList<string> Codes, string Text) Explain(MemberIntents requester, Candidate candidate, PairScore score)
+    {
+        var codes = new List<string>();
+        if (candidate.CategoryCompatibility > 0) codes.Add("CATEGORY_COMPLEMENT");
+        if (candidate.IndustryCompatibility > 0) codes.Add("INDUSTRY_MATCH");
+        if (candidate.GeographyCompatibility > 0) codes.Add("GEOGRAPHY_MATCH");
+        if (score.Reverse is not null) codes.Add("RECIPROCAL_INTENT");
+        if (candidate.Freshness >= .75) codes.Add("RECENT_INTENT");
+        if (codes.Count == 0 || score.Semantic < .20) return (Array.Empty<string>(), string.Empty);
+        var requirement = requester.Want?.Category ?? "your requirement";
+        return (codes, $"This member offers {candidate.Offer.Category ?? "services"} relevant to {requirement}.");
+    }
 }
+
 public sealed class MatchRanker(IExplanationGenerator explanations) : IMatchRanker
 {
-    public IReadOnlyList<RankedMatch> Rank(Intent requester, IReadOnlyList<(Candidate Candidate, PairScore Score)> candidates, RankingConfig config, int limit) => candidates.Select(x => { var s = Math.Clamp(config.SemanticWeight * x.Score.Reciprocal + config.CategoryWeight * x.Score.Structured + config.FreshnessWeight * x.Score.Freshness, 0, 1); var e = explanations.Explain(requester, x.Candidate, x.Score); return new RankedMatch(x.Candidate.MemberId, s, s >= .75 ? "strong_match" : "potential_match", e.Codes, e.Text); }).Where(x => x.Score >= config.Threshold && x.ReasonCodes.Count > 0).OrderByDescending(x => x.Score).Take(limit).ToArray();
+    public IReadOnlyList<RankedMatch> Rank(MemberIntents requester, IReadOnlyList<(Candidate Candidate, PairScore Score)> candidates, RankingConfig config, int limit)
+    {
+        var ranked = candidates.Select(x =>
+        {
+            var score = Math.Clamp(config.SemanticWeight * x.Score.Semantic + config.CategoryWeight * x.Candidate.CategoryCompatibility + config.IndustryWeight * x.Candidate.IndustryCompatibility + config.GeographyWeight * x.Candidate.GeographyCompatibility + config.FreshnessWeight * x.Candidate.Freshness, 0, 1);
+            var explanation = explanations.Explain(requester, x.Candidate, x.Score);
+            return new RankedMatch(x.Candidate.MemberId, score, score >= .75 ? "STRONG_MATCH" : "PLAUSIBLE_MATCH", explanation.Codes, explanation.Text, x.Score.Semantic, x.Score.Reverse is null ? null : x.Score.Reciprocal);
+        }).Where(x => x.Score >= config.Threshold && x.ReasonCodes.Count > 0).OrderByDescending(x => x.Score).Take(limit).ToArray();
+
+        return ranked.Select((match, index) => match with { Rank = index + 1 }).ToArray();
+    }
 }

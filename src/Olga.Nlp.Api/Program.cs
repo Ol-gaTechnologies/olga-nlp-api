@@ -3,11 +3,14 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 using Olga.Nlp.Api;
 using Olga.Nlp.Application;
 using Olga.Nlp.Contracts;
 using Olga.Nlp.Domain;
 using Olga.Nlp.Infrastructure;
+using Pgvector.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.ConfigureHttpJsonOptions(o =>
@@ -18,10 +21,30 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 builder.Services.AddOpenApi();
 builder.Services.AddHealthChecks();
 
-var connection = builder.Configuration.GetConnectionString("AzureSql");
+var connection = builder.Configuration.GetConnectionString("PostgreSql");
 var useInMemory = string.IsNullOrWhiteSpace(connection);
 if (useInMemory) builder.Services.AddDbContext<NlpDbContext>(o => o.UseInMemoryDatabase("olga-nlp-local"));
-else builder.Services.AddDbContext<NlpDbContext>(o => o.UseSqlServer(connection));
+else
+{
+    var connectionBuilder = new NpgsqlConnectionStringBuilder(connection)
+    {
+        Pooling = true,
+        MaxPoolSize = 25,
+        CommandTimeout = 15,
+        SslMode = SslMode.VerifyFull
+    };
+    builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
+    {
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionBuilder.ConnectionString);
+        dataSourceBuilder.UseVector();
+        return dataSourceBuilder.Build();
+    });
+    builder.Services.AddSingleton<PostgresTransactionGuardInterceptor>();
+    builder.Services.AddDbContext<NlpDbContext>((services, options) => options
+        .AddInterceptors(services.GetRequiredService<PostgresTransactionGuardInterceptor>())
+        .UseNpgsql(services.GetRequiredService<NpgsqlDataSource>(),
+            postgres => postgres.UseVector().CommandTimeout(15).EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null)));
+}
 
 builder.Services.AddSingleton<IPiiChecker, PiiChecker>();
 builder.Services.AddSingleton<ITextNormalizer, TextNormalizer>();
@@ -54,7 +77,7 @@ else
 var app = builder.Build();
 var expectedServiceToken = app.Configuration["ServiceAuthorization:Token"];
 if (!useInMemory && string.IsNullOrWhiteSpace(expectedServiceToken))
-    throw new InvalidOperationException("ServiceAuthorization:Token is required when Azure SQL is configured.");
+    throw new InvalidOperationException("ServiceAuthorization:Token is required when PostgreSQL is configured.");
 
 app.Use(async (context, next) =>
 {
@@ -78,6 +101,11 @@ app.Use(async (context, next) =>
     }
     catch (DomainConflictException exception) { await WriteError(context, 409, exception.Code, SafeMessage(exception.Code)); }
     catch (DbUpdateConcurrencyException) { await WriteError(context, 409, "RESOURCE_VERSION_CONFLICT", SafeMessage("RESOURCE_VERSION_CONFLICT")); }
+    catch (DbUpdateException exception) when (exception.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation }) { await WriteError(context, 409, "RESOURCE_CONFLICT", SafeMessage("RESOURCE_CONFLICT")); }
+    catch (DbUpdateException exception) when (exception.InnerException is PostgresException postgres && IsTransientDatabaseState(postgres.SqlState)) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
+    catch (RetryLimitExceededException) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
+    catch (PostgresException exception) when (IsTransientDatabaseState(exception.SqlState)) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
+    catch (NpgsqlException exception) when (exception.IsTransient) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (DomainNotFoundException exception) { await WriteError(context, 404, exception.Code, SafeMessage(exception.Code)); }
     catch (ArgumentException exception) { await WriteError(context, 400, exception.Message, SafeMessage(exception.Message)); }
     catch (Exception) { await WriteError(context, 500, "INTERNAL_ERROR", "The request could not be completed."); }
@@ -191,6 +219,12 @@ static bool TokenMatches(string supplied, string expected)
     var right = Encoding.UTF8.GetBytes(expected);
     return left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
 }
+
+static bool IsTransientDatabaseState(string sqlState) => sqlState is
+    PostgresErrorCodes.SerializationFailure or
+    PostgresErrorCodes.DeadlockDetected or
+    PostgresErrorCodes.LockNotAvailable or
+    PostgresErrorCodes.QueryCanceled;
 
 static bool CanEvaluate(HttpContext context, IWebHostEnvironment environment, string? expectedServiceToken)
 {

@@ -2,11 +2,34 @@ using Microsoft.EntityFrameworkCore;
 using Olga.Nlp.Application;
 using Olga.Nlp.Contracts;
 using Olga.Nlp.Infrastructure;
+using Pgvector.EntityFrameworkCore;
 
 namespace Olga.Nlp.IntegrationTests;
 
 public sealed class MatchingIntegrationTests
 {
+    [Fact]
+    public void PostgreSql_model_uses_source_of_truth_storage_types()
+    {
+        var options = new DbContextOptionsBuilder<NlpDbContext>()
+            .UseNpgsql("Host=localhost;Database=olga_model_check;Username=model_check", postgres => postgres.UseVector())
+            .Options;
+        using var db = new NlpDbContext(options);
+        var intent = db.Model.FindEntityType(typeof(NlpIntentRow))!;
+        var embedding = db.Model.FindEntityType(typeof(NlpEmbeddingRow))!;
+        var result = db.Model.FindEntityType(typeof(NlpMatchResultRow))!;
+
+        Assert.Equal("nlp_intent", intent.GetTableName());
+        Assert.Equal(4000, intent.FindProperty(nameof(NlpIntentRow.OriginalText))!.GetMaxLength());
+        Assert.Equal("timestamp with time zone", intent.FindProperty(nameof(NlpIntentRow.ExpiresAt))!.GetColumnType());
+        Assert.Equal("boolean", intent.FindProperty(nameof(NlpIntentRow.ContainsPii))!.GetColumnType());
+        Assert.Equal(typeof(long), intent.FindProperty(nameof(NlpIntentRow.RowVersion))!.ClrType);
+        Assert.True(intent.FindProperty(nameof(NlpIntentRow.RowVersion))!.IsConcurrencyToken);
+        Assert.Equal("vector(1536)", embedding.FindProperty(nameof(NlpEmbeddingRow.Embedding))!.GetColumnType());
+        Assert.Equal(8, result.FindProperty(nameof(NlpMatchResultRow.FinalScore))!.GetPrecision());
+        Assert.Equal(7, result.FindProperty(nameof(NlpMatchResultRow.FinalScore))!.GetScale());
+    }
+
     [Fact]
     public async Task Search_reuses_stored_embeddings_and_excludes_blocked_member()
     {
@@ -17,7 +40,7 @@ public sealed class MatchingIntegrationTests
         var intentRepository = new IntentRepository(db);
         var intentService = new IntentService(intentRepository, normalizer, new InlineIntentProcessingDispatcher(provider, intentRepository));
         var expiry = DateTimeOffset.UtcNow.AddDays(10);
-        db.RankingConfigs.Add(new() { RankingVersion = "ranking-test", SemanticWeight = .4, CategoryWeight = .25, IndustryWeight = .15, GeographyWeight = .1, FreshnessWeight = .1, Threshold = .35, ActiveFrom = DateTimeOffset.UtcNow.AddDays(-1) });
+        db.RankingConfigs.Add(new() { RankingVersion = "ranking-test", SemanticWeight = .4m, CategoryWeight = .25m, IndustryWeight = .15m, GeographyWeight = .1m, FreshnessWeight = .1m, Threshold = .35m, ActiveFrom = DateTimeOffset.UtcNow.AddDays(-1) });
         foreach (var member in new[] { "A", "B", "BLOCKED" }) db.MemberEligibility.Add(new() { MemberId = member, ContextId = "event", IsLive = true, IsVisible = true, HasConsent = true });
         db.MemberRelationships.Add(new() { MemberId = "A", OtherMemberId = "BLOCKED", ContextId = "event", IsBlocked = true });
         await db.SaveChangesAsync();
@@ -78,7 +101,7 @@ public sealed class MatchingIntegrationTests
         db.MatchResults.Add(new NlpMatchResultRow
         {
             RequestId = "request", RequesterId = "A", CandidateId = "B", Rank = 1,
-            SemanticScore = .8, ReciprocalScore = .7, FinalScore = .75, Label = "STRONG_MATCH",
+            SemanticScore = .8m, ReciprocalScore = .7m, FinalScore = .75m, Label = "STRONG_MATCH",
             ReasonCodes = "[]", ReasonText = "Relevant", ModelVersion = "model",
             PreprocessingVersion = "normalizer", RankingVersion = "ranking", CreatedAt = DateTimeOffset.UtcNow
         });
@@ -100,7 +123,7 @@ public sealed class MatchingIntegrationTests
     {
         var options = new DbContextOptionsBuilder<NlpDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         await using var db = new NlpDbContext(options);
-        db.RankingConfigs.Add(new NlpRankingConfigRow { RankingVersion = "ranking", SemanticWeight = 1, Threshold = .3, ActiveFrom = DateTimeOffset.UtcNow.AddDays(-1) });
+        db.RankingConfigs.Add(new NlpRankingConfigRow { RankingVersion = "ranking", SemanticWeight = 1m, Threshold = .3m, ActiveFrom = DateTimeOffset.UtcNow.AddDays(-1) });
         db.EvaluationDatasets.Add(new NlpEvaluationDatasetRow { DatasetId = "approved", Name = "QA", Version = "1", SourcePolicy = "De-identified", Status = "APPROVED", CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
         db.EvaluationPairs.AddRange(
             new NlpEvaluationPairRow { DatasetId = "approved", RequesterIntentText = "cold-chain storage", CandidateIntentText = "temperature controlled warehouse", GoldLabel = "STRONG", Split = "TEST" },

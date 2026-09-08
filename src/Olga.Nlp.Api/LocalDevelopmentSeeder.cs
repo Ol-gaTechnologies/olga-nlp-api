@@ -13,7 +13,7 @@ public static class LocalDevelopmentSeeder
         var db = scope.ServiceProvider.GetRequiredService<NlpDbContext>();
         if (await db.Intents.AnyAsync(ct)) return;
 
-        db.RankingConfigs.Add(new() { RankingVersion = "ranking-v1", SemanticWeight = .40, CategoryWeight = .25, IndustryWeight = .15, GeographyWeight = .10, FreshnessWeight = .10, Threshold = .35, ActiveFrom = DateTimeOffset.UtcNow.AddDays(-1) });
+        db.RankingConfigs.Add(new() { RankingVersion = "ranking-v1", SemanticWeight = .40m, CategoryWeight = .25m, IndustryWeight = .15m, GeographyWeight = .10m, FreshnessWeight = .10m, Threshold = .35m, ActiveFrom = DateTimeOffset.UtcNow.AddDays(-1) });
         db.ModelVersions.Add(new() { ModelVersion = "fake-embedding-v2", Provider = "LOCAL", DeploymentName = "fake", Dimensions = 128, PreprocessingVersion = "normalizer-v1", Status = "ACTIVE", ActivatedAt = DateTimeOffset.UtcNow, CreatedAt = DateTimeOffset.UtcNow });
         db.EvaluationDatasets.Add(new() { DatasetId = "local-smoke-v1", Name = "Local smoke test", Version = "1", SourcePolicy = "Synthetic and de-identified", Status = "APPROVED", CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
         db.EvaluationPairs.AddRange(

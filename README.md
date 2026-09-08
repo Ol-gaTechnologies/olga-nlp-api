@@ -4,7 +4,7 @@
 
 ## Service boundary
 
-OLGA uses two logical APIs that may share one Azure deployment and Azure SQL database during the MVP. Schema and API ownership remain separate.
+OLGA uses two logical APIs that may share one Azure deployment and Azure Database for PostgreSQL Flexible Server during the MVP. Schema and API ownership remain separate.
 
 The Core Product API owns authentication integration, members, profiles, profile visibility, consent, events, event registration, Live Mode, presence, connections, blocks, chat, files, notifications, privacy workflows, moderation, and administration.
 
@@ -21,7 +21,7 @@ Cross-API effects use the transactional `ops.OutboxEvent`. NLP emits `NlpIntentN
 
 ## Local development
 
-The Development profile uses EF Core InMemory, deterministic fake embeddings, inline embedding processing, and seeded members. It requires no Azure subscription or SQL Server.
+The Development profile uses EF Core InMemory, deterministic fake embeddings, inline embedding processing, and seeded members. It requires no Azure subscription or PostgreSQL server.
 
 ```powershell
 dotnet restore Olga.Nlp.sln
@@ -56,7 +56,7 @@ Normalization is synchronous. The intent row commits original text, PII-minimize
 
 Development uses `EmbeddingProcessing:Mode=Inline`. Production uses `Queued`, which writes `nlp.NlpProcessingJob`; the worker embeds the stored normalized text, applies bounded retries and a lease, and marks the intent `MATCH_READY`. Normal searches reuse stored vectors and never call the embedding provider.
 
-All WANT and OFFER vectors in a comparison must use the same active model version and dimensionality. Candidate retrieval is bounded to at most 200 eligible candidates before .NET ranking. The current varbinary/application-similarity path remains valid until native Azure SQL vector support is validated in the target subscription.
+All WANT and OFFER vectors in a comparison must use the same active model version and 1,536 dimensions. Candidate retrieval is bounded to at most 200 eligible candidates before .NET ranking. PostgreSQL persists embeddings as native `vector(1536)` values; application ranking reuses those stored vectors.
 
 ## API contracts
 
@@ -90,7 +90,7 @@ Evaluation runs require `nlp.evaluate`, the `NLP_EVALUATOR` role, or the authent
 
 ## Production configuration
 
-- Configure `ConnectionStrings__AzureSql` and set `EmbeddingProcessing__Mode=Queued`.
+- Configure `ConnectionStrings__PostgreSql` for the PgBouncer endpoint and set `EmbeddingProcessing__Mode=Queued`.
 - Implement `AzureEmbeddingProvider` with the approved Azure OpenAI deployment and managed identity.
 - Configure `ServiceAuthorization__Token` or replace the service boundary with the approved workload-identity mechanism.
 - Keep API/worker/migration database identities separate and grant least privilege by schema/procedure.

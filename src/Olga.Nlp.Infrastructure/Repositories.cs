@@ -1,26 +1,17 @@
+using System.Data;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Olga.Nlp.Application;
 using Olga.Nlp.Domain;
+using Pgvector;
 
 namespace Olga.Nlp.Infrastructure;
 
 public static class EmbeddingBinary
 {
-    public static byte[] Serialize(float[] values)
-    {
-        var bytes = new byte[values.Length * sizeof(float)];
-        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
-        return bytes;
-    }
+    public static Vector Serialize(float[] values) => new(values);
 
-    public static float[] Deserialize(byte[] bytes)
-    {
-        if (bytes.Length % sizeof(float) != 0) throw new InvalidDataException("Invalid embedding payload length.");
-        var values = new float[bytes.Length / sizeof(float)];
-        Buffer.BlockCopy(bytes, 0, values, 0, bytes.Length);
-        return values;
-    }
+    public static float[] Deserialize(Vector vector) => vector.ToArray();
 }
 
 public sealed class IntentRepository(NlpDbContext db) : IIntentRepository
@@ -70,6 +61,7 @@ public sealed class IntentRepository(NlpDbContext db) : IIntentRepository
 
     public async Task<Intent> MarkReadyAsync(string intentId, string normalizedText, string normalizedHash, float[] embedding, string modelVersion, string preprocessingVersion, CancellationToken ct)
     {
+        if (db.Database.IsRelational() && embedding.Length != 1536) throw new ArgumentException("EMBEDDING_DIMENSION_MISMATCH");
         var row = await db.Intents.SingleAsync(x => x.IntentId == intentId, ct);
         if (!string.Equals(row.NormalizedHash, normalizedHash, StringComparison.Ordinal)) throw new DomainConflictException("INTENT_CHANGED_DURING_EMBEDDING");
 
@@ -118,8 +110,8 @@ public sealed class IntentRepository(NlpDbContext db) : IIntentRepository
         _ => IntentStatus.Processing
     };
 
-    private static string CreateETag(NlpIntentRow row) => row.RowVersion.Length > 0
-        ? $"\"{Convert.ToBase64String(row.RowVersion)}\""
+    private static string CreateETag(NlpIntentRow row) => row.RowVersion > 0
+        ? $"\"{row.RowVersion:x}\""
         : $"\"{row.UpdatedAt.UtcTicks:x}\"";
 
     private static bool ETagMatches(NlpIntentRow row, string expected) =>
@@ -267,7 +259,7 @@ public sealed class RankingConfigRepository(NlpDbContext db) : IRankingConfigRep
         var row = await db.RankingConfigs.AsNoTracking().Where(x => x.ActiveFrom <= now && (x.ActiveTo == null || x.ActiveTo > now)).OrderByDescending(x => x.ActiveFrom).FirstOrDefaultAsync(ct);
         return row is null
             ? new RankingConfig("ranking-v1")
-            : new RankingConfig(row.RankingVersion, row.SemanticWeight, row.CategoryWeight, row.IndustryWeight, row.GeographyWeight, row.FreshnessWeight, row.Threshold, row.EventWeight, row.ConfigJson);
+            : new RankingConfig(row.RankingVersion, (double)row.SemanticWeight, (double)row.CategoryWeight, (double)row.IndustryWeight, (double)row.GeographyWeight, (double)row.FreshnessWeight, (double)row.Threshold, (double)row.EventWeight, row.ConfigJson);
     }
 }
 
@@ -315,7 +307,7 @@ public sealed class MatchRequestRepository(NlpDbContext db) : IMatchRequestRepos
         row.PreprocessingVersion = preprocessingVersion;
         row.ModelVersion = modelVersion;
         row.RankingVersion = rankingVersion;
-        row.RankingThreshold = threshold;
+        row.RankingThreshold = (decimal)threshold;
         row.CandidateCount = candidateCount;
         row.CompletedAt = DateTimeOffset.UtcNow;
         row.UpdatedAt = row.CompletedAt.Value;
@@ -335,13 +327,13 @@ public sealed class MatchRequestRepository(NlpDbContext db) : IMatchRequestRepos
     }
 
     internal static RankedMatch MapResult(NlpMatchResultRow row) => new(
-        row.CandidateId, row.FinalScore, row.Label, DeserializeCodes(row.ReasonCodes), row.ReasonText,
-        row.SemanticScore, row.ReciprocalScore, row.Rank, row.MatchResultId);
+        row.CandidateId, (double)row.FinalScore, row.Label, DeserializeCodes(row.ReasonCodes), row.ReasonText,
+        (double)row.SemanticScore, (double?)row.ReciprocalScore, row.Rank, row.MatchResultId);
 
     private static MatchExecution Map(NlpMatchRequestRow row) => new(
         row.RequestId, row.RequestHash, row.RequesterId, row.IntentId, row.ContextId, row.LanguageCode,
         row.RequestedLimit, row.RequestOptionsJson, ParseStatus(row.Status), row.PreprocessingVersion,
-        row.ModelVersion, row.RankingVersion, row.RankingThreshold, row.CandidateCount,
+        row.ModelVersion, row.RankingVersion, (double?)row.RankingThreshold, row.CandidateCount,
         row.CreatedAt, row.CompletedAt, row.ErrorCode);
 
     private static MatchExecutionStatus ParseStatus(string status) => status switch
@@ -362,25 +354,37 @@ public sealed class MatchResultRepository(NlpDbContext db) : IMatchResultReposit
 {
     public async Task<IReadOnlyList<RankedMatch>> SaveAsync(string requestId, string requesterId, IReadOnlyList<RankedMatch> matches, string modelVersion, string preprocessingVersion, string rankingVersion, CancellationToken ct)
     {
-        var existing = await db.MatchResults.AsNoTracking().Where(x => x.RequestId == requestId).OrderBy(x => x.Rank).ToListAsync(ct);
-        if (existing.Count > 0) return existing.Select(MatchRequestRepository.MapResult).ToArray();
-
-        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(ct) : null;
-        var now = DateTimeOffset.UtcNow;
-        var rows = matches.Select((match, index) => new NlpMatchResultRow
+        async Task<IReadOnlyList<RankedMatch>> PersistAsync()
         {
-            RequestId = requestId, RequesterId = requesterId, CandidateId = match.MemberId,
-            Rank = checked((short)(index + 1)), SemanticScore = match.SemanticScore,
-            ReciprocalScore = match.ReciprocalScore, FinalScore = match.Score,
-            Label = match.Label.ToUpperInvariant(), ReasonCodes = JsonSerializer.Serialize(match.ReasonCodes),
-            ReasonText = match.ReasonText, ModelVersion = modelVersion,
-            PreprocessingVersion = preprocessingVersion, RankingVersion = rankingVersion,
-            PolicyStatus = "ELIGIBLE", CreatedAt = now
-        }).ToArray();
-        db.MatchResults.AddRange(rows);
-        await db.SaveChangesAsync(ct);
-        if (transaction is not null) await transaction.CommitAsync(ct);
-        return rows.Select(MatchRequestRepository.MapResult).ToArray();
+            var existing = await db.MatchResults.AsNoTracking().Where(x => x.RequestId == requestId).OrderBy(x => x.Rank).ToListAsync(ct);
+            if (existing.Count > 0) return existing.Select(MatchRequestRepository.MapResult).ToArray();
+
+            var now = DateTimeOffset.UtcNow;
+            var rows = matches.Select((match, index) => new NlpMatchResultRow
+            {
+                RequestId = requestId, RequesterId = requesterId, CandidateId = match.MemberId,
+                Rank = checked((short)(index + 1)), SemanticScore = (decimal)match.SemanticScore,
+                ReciprocalScore = (decimal?)match.ReciprocalScore, FinalScore = (decimal)match.Score,
+                Label = match.Label.ToUpperInvariant(), ReasonCodes = JsonSerializer.Serialize(match.ReasonCodes),
+                ReasonText = match.ReasonText, ModelVersion = modelVersion,
+                PreprocessingVersion = preprocessingVersion, RankingVersion = rankingVersion,
+                PolicyStatus = "ELIGIBLE", CreatedAt = now
+            }).ToArray();
+            db.MatchResults.AddRange(rows);
+            await db.SaveChangesAsync(ct);
+            return rows.Select(MatchRequestRepository.MapResult).ToArray();
+        }
+
+        if (!db.Database.IsRelational()) return await PersistAsync();
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            // Serializable protects the idempotent request result set under concurrent retries.
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var result = await PersistAsync();
+            await transaction.CommitAsync(ct);
+            return result;
+        });
     }
 }
 

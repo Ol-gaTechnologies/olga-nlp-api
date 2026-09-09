@@ -23,6 +23,8 @@ Cross-API effects use the transactional `ops.OutboxEvent`. NLP emits `NlpIntentN
 
 The Development profile uses EF Core InMemory, deterministic fake embeddings, inline embedding processing, and seeded members. It requires no Azure subscription or PostgreSQL server.
 
+The pull-request and environment deployment process is documented in [CI/CD operations](docs/CI_CD.md).
+
 ```powershell
 dotnet restore Olga.Nlp.sln
 dotnet test Olga.Nlp.sln

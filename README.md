@@ -15,7 +15,7 @@ The NLP API owns:
 - idempotent match requests, ranked results, explanations, feedback, suppression, and evaluation;
 - bounded candidate retrieval through approved read-only projections.
 
-The NLP API must not update Core Product API tables or infer permission from a score. Production eligibility is read from `nlp.vw_MemberContextEligibility` and `nlp.vw_MemberRelationship`, which the database implementation derives from authoritative IAM, profile, consent, event, Live Mode, connection, and block state. Local InMemory fixtures use stand-alone tables behind the same repository interface.
+The NLP API must not update Core Product API tables or infer permission from a score. Production eligibility is read from `nlp.vw_member_context_eligibility` and `nlp.vw_member_relationship`, which the database implementation derives from authoritative IAM, profile, consent, event, Live Mode, connection, and block state. Local InMemory fixtures use stand-alone tables behind the same repository interface.
 
 Cross-API effects use the transactional `ops.OutboxEvent`. NLP emits `NlpIntentNormalized.v1`, `NlpIntentMatchReady.v1`, `NlpMatchRequestCompleted.v1`, `NlpFeedbackRecorded.v1`, and `NlpEvaluationRunCompleted.v1` with minimal metadata and no raw intent, feedback, or evaluation sample text. The Core Product API/its workers consume those events to drive notifications, mobile projections, analytics, privacy, or other product workflows.
 
@@ -95,7 +95,7 @@ Evaluation runs require `nlp.evaluate`, the `NLP_EVALUATOR` role, or the authent
 - Configure `ConnectionStrings__PostgreSql` for the PgBouncer endpoint and set `EmbeddingProcessing__Mode=Queued`.
 - Implement `AzureEmbeddingProvider` with the approved Azure OpenAI deployment and managed identity.
 - Configure `ServiceAuthorization__Token` or replace the service boundary with the approved workload-identity mechanism.
-- Keep API/worker/migration database identities separate and grant least privilege by schema/procedure.
+- Keep API/worker/migration database identities separate and grant least privilege by schema/function.
 - Keep intent text, vectors, identity values, presence, provider payloads, and feedback text out of telemetry.
 - Use private endpoints, Key Vault, Application Insights/OpenTelemetry, retry/dead-letter monitoring, and the approved retention/privacy workflows.
 

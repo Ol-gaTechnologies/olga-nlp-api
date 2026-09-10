@@ -55,7 +55,7 @@ Caller -> POST /v1/match-requests + Idempotency-Key
   -> return only the requested top 3-7; never return vectors or policy internals
 ```
 
-In the integrated database, `nlp.vw_MemberContextEligibility` and `nlp.vw_MemberRelationship` must be read-only projections derived from Core-owned IAM, consent, event, social, and moderation state. Stand-alone local tables are test fixtures behind the same repository interface, not production authorities.
+In the integrated database, `nlp.vw_member_context_eligibility` and `nlp.vw_member_relationship` must be read-only projections derived from Core-owned IAM, consent, event, social, and moderation state. Stand-alone local tables are test fixtures behind the same repository interface, not production authorities.
 
 ## Feedback and evaluation flow
 

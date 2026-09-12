@@ -90,6 +90,13 @@ app.Use(async (context, next) =>
             return;
         }
 
+        var idempotencyKey = context.Request.Headers["Idempotency-Key"].ToString();
+        if (IsStateMutation(context.Request) && (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 128))
+        {
+            await WriteError(context, 400, "IDEMPOTENCY_KEY_REQUIRED", SafeMessage("IDEMPOTENCY_KEY_REQUIRED"));
+            return;
+        }
+
         var isProbe = context.Request.Path.Equals("/health") || context.Request.Path.Equals("/ready");
         if (!isProbe && !string.IsNullOrWhiteSpace(expectedServiceToken) && !TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken))
         {
@@ -105,6 +112,11 @@ app.Use(async (context, next) =>
     catch (DbUpdateException exception) when (exception.InnerException is PostgresException postgres && IsTransientDatabaseState(postgres.SqlState)) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (RetryLimitExceededException) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (PostgresException exception) when (IsTransientDatabaseState(exception.SqlState)) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation) { await WriteError(context, 409, "RESOURCE_CONFLICT", SafeMessage("RESOURCE_CONFLICT")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation) { await WriteError(context, 409, "RESOURCE_STATE_CONFLICT", SafeMessage("RESOURCE_STATE_CONFLICT")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege) { await WriteError(context, 403, "RESOURCE_FORBIDDEN", SafeMessage("RESOURCE_FORBIDDEN")); }
+    catch (PostgresException exception) when (exception.SqlState == "P0002") { await WriteError(context, 404, "RESOURCE_NOT_FOUND", SafeMessage("RESOURCE_NOT_FOUND")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InvalidParameterValue) { await WriteError(context, 400, "REQUEST_INVALID", SafeMessage("REQUEST_INVALID")); }
     catch (NpgsqlException exception) when (exception.IsTransient) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (DomainNotFoundException exception) { await WriteError(context, 404, exception.Code, SafeMessage(exception.Code)); }
     catch (ArgumentException exception) { await WriteError(context, 400, exception.Message, SafeMessage(exception.Message)); }
@@ -202,6 +214,14 @@ static bool ValidMatchRequest(MatchSearchRequest request) =>
     !string.IsNullOrWhiteSpace(request.RequestId) && !string.IsNullOrWhiteSpace(request.IntentId) &&
     !string.IsNullOrWhiteSpace(request.ContextId) && request.Limit is >= 3 and <= 7 &&
     (request.Options?.Threshold is null or >= 0 and <= 1);
+
+static bool IsStateMutation(HttpRequest request) => request.Method == "POST" &&
+    (request.Path.StartsWithSegments("/v1/intents") ||
+     request.Path.StartsWithSegments("/v1/match-requests") ||
+     request.Path.StartsWithSegments("/v1/matches/search") ||
+     request.Path.StartsWithSegments("/v1/feedback") ||
+     request.Path.Value?.Contains("/feedback", StringComparison.Ordinal) == true ||
+     request.Path.StartsWithSegments("/v1/internal/evaluation-runs"));
 
 static bool TryMember(HttpContext context, IConfiguration configuration, IWebHostEnvironment environment, out string memberId)
 {

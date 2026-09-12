@@ -13,7 +13,9 @@ public sealed class MatchContractTests : IClassFixture<WebApplicationFactory<Pro
     [Fact]
     public async Task Valid_local_search_returns_versioned_explainable_match()
     {
-        var response = await client.PostAsJsonAsync("/v1/matches/search", new MatchSearchRequest("contract-1", "a-want", "event-001", 7), Json);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/matches/search") { Content = JsonContent.Create(new MatchSearchRequest("contract-1", "a-want", "event-001", 7), options: Json) };
+        request.Headers.Add("Idempotency-Key", "contract-1");
+        var response = await client.SendAsync(request);
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadFromJsonAsync<MatchSearchResponse>(Json);
         Assert.NotNull(body);

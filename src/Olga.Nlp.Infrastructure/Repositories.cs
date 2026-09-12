@@ -1,6 +1,10 @@
 using System.Data;
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
+using NpgsqlTypes;
 using Olga.Nlp.Application;
 using Olga.Nlp.Domain;
 using Pgvector;
@@ -164,6 +168,7 @@ public sealed class CandidateRepository(NlpDbContext db) : ICandidateRepository
 {
     public async Task<MemberIntents?> GetRequesterIntentsAsync(string memberId, string requestedIntentId, string contextId, CancellationToken ct)
     {
+        if (db.Database.IsRelational()) return await GetRelationalRequesterAsync(memberId, requestedIntentId, contextId, ct);
         var rows = await ReadyRows(memberId, contextId, ct);
         var requestedWant = rows.FirstOrDefault(x => x.IntentId == requestedIntentId && x.IntentType == "WANT");
         if (requestedWant is null) return null;
@@ -174,7 +179,8 @@ public sealed class CandidateRepository(NlpDbContext db) : ICandidateRepository
 
     public async Task<IReadOnlyList<Candidate>> GetEligibleCandidatesAsync(string requesterId, string contextId, string modelVersion, int maxRows, CancellationToken ct)
     {
-        maxRows = Math.Clamp(maxRows, 1, 200);
+        maxRows = Math.Clamp(maxRows, 50, 200);
+        if (db.Database.IsRelational()) return await GetRelationalCandidatesAsync(requesterId, contextId, modelVersion, maxRows, ct);
         var requesterRows = await ReadyRows(requesterId, contextId, ct);
         var requester = await MapMemberAsync(requesterId, requesterRows, null, modelVersion, ct);
         if (requester?.Want is null) return Array.Empty<Candidate>();
@@ -217,6 +223,107 @@ public sealed class CandidateRepository(NlpDbContext db) : ICandidateRepository
         }
         return candidates;
     }
+
+    private async Task<MemberIntents?> GetRelationalRequesterAsync(string memberId, string requestedIntentId, string contextId, CancellationToken ct)
+    {
+        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+        var shouldClose = connection.State != ConnectionState.Open;
+        if (shouldClose) await connection.OpenAsync(ct);
+        try
+        {
+            await using var command = new NpgsqlCommand("SELECT * FROM nlp.get_requester_intent(@p_member_id, @p_intent_id, @p_context_id)", connection);
+            AddVarchar(command, "p_member_id", memberId);
+            AddVarchar(command, "p_intent_id", requestedIntentId);
+            AddVarchar(command, "p_context_id", contextId);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct) || !string.Equals(reader.GetString(3), "WANT", StringComparison.Ordinal)) return null;
+            var projectedWant = MapFunctionIntent(reader);
+            await reader.CloseAsync();
+
+            var wantRow = await db.Intents.AsNoTracking().SingleAsync(x => x.MemberId == memberId && x.IntentId == requestedIntentId && x.ContextId == contextId, ct);
+            var latestWantId = await db.Intents.AsNoTracking()
+                .Where(x => x.MemberId == memberId && x.ContextId == contextId && x.IntentType == "WANT" && x.Status == "MATCH_READY" && x.ExpiresAt > DateTimeOffset.UtcNow)
+                .OrderByDescending(x => x.UpdatedAt).ThenBy(x => x.IntentId).Select(x => x.IntentId).FirstAsync(ct);
+            // get_eligible_candidates uses the latest requester WANT; fail closed instead of
+            // ranking a pool selected with a different intent embedding.
+            if (!string.Equals(latestWantId, requestedIntentId, StringComparison.Ordinal)) return null;
+            var wantEmbedding = await db.Embeddings.AsNoTracking().SingleAsync(x => x.IntentId == requestedIntentId && x.ModelVersion == projectedWant.ModelVersion && x.Status == "ACTIVE" && x.NormalizedHash == wantRow.NormalizedHash, ct);
+            var want = IntentRepository.Map(wantRow, wantEmbedding);
+
+            var offerRow = await db.Intents.AsNoTracking()
+                .Where(x => x.MemberId == memberId && x.ContextId == contextId && x.IntentType == "OFFER" && x.Status == "MATCH_READY" && x.ExpiresAt > DateTimeOffset.UtcNow)
+                .OrderByDescending(x => x.UpdatedAt).FirstOrDefaultAsync(ct);
+            Intent? offer = null;
+            if (offerRow is not null)
+            {
+                var embedding = await db.Embeddings.AsNoTracking().Where(x => x.IntentId == offerRow.IntentId && x.ModelVersion == want.ModelVersion && x.Status == "ACTIVE" && x.NormalizedHash == offerRow.NormalizedHash).FirstOrDefaultAsync(ct);
+                if (embedding is not null) offer = IntentRepository.Map(offerRow, embedding);
+            }
+            return new MemberIntents(memberId, offer, want);
+        }
+        finally { if (shouldClose) await connection.CloseAsync(); }
+    }
+
+    private async Task<IReadOnlyList<Candidate>> GetRelationalCandidatesAsync(string requesterId, string contextId, string modelVersion, int maxRows, CancellationToken ct)
+    {
+        var offers = new List<Intent>();
+        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+        var shouldClose = connection.State != ConnectionState.Open;
+        if (shouldClose) await connection.OpenAsync(ct);
+        try
+        {
+            await using var command = new NpgsqlCommand("SELECT * FROM nlp.get_eligible_candidates(@p_requester_id, @p_context_id, @p_max_rows)", connection);
+            AddVarchar(command, "p_requester_id", requesterId);
+            AddVarchar(command, "p_context_id", contextId);
+            command.Parameters.Add(new NpgsqlParameter("p_max_rows", NpgsqlDbType.Integer) { Value = maxRows });
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var offer = MapFunctionIntent(reader);
+                if (string.Equals(offer.ModelVersion, modelVersion, StringComparison.Ordinal)) offers.Add(offer);
+            }
+        }
+        finally { if (shouldClose) await connection.CloseAsync(); }
+
+        if (offers.Count == 0) return [];
+        var requesterWant = await db.Intents.AsNoTracking()
+            .Where(x => x.MemberId == requesterId && x.ContextId == contextId && x.IntentType == "WANT" && x.Status == "MATCH_READY" && x.ExpiresAt > DateTimeOffset.UtcNow)
+            .OrderByDescending(x => x.UpdatedAt).FirstAsync(ct);
+        var memberIds = offers.Select(x => x.MemberId).Distinct().ToArray();
+        var wantRows = await db.Intents.AsNoTracking()
+            .Where(x => memberIds.Contains(x.MemberId) && x.ContextId == contextId && x.IntentType == "WANT" && x.Status == "MATCH_READY" && x.ExpiresAt > DateTimeOffset.UtcNow)
+            .OrderByDescending(x => x.UpdatedAt).ToListAsync(ct);
+        var wantIds = wantRows.Select(x => x.IntentId).ToArray();
+        var wantEmbeddings = await db.Embeddings.AsNoTracking().Where(x => wantIds.Contains(x.IntentId) && x.ModelVersion == modelVersion && x.Status == "ACTIVE").ToListAsync(ct);
+        var now = DateTimeOffset.UtcNow;
+        return offers.Select(offer =>
+        {
+            var wantRow = wantRows.FirstOrDefault(x => x.MemberId == offer.MemberId);
+            var wantEmbedding = wantRow is null ? null : wantEmbeddings.FirstOrDefault(x => x.IntentId == wantRow.IntentId && x.NormalizedHash == wantRow.NormalizedHash);
+            var want = wantRow is not null && wantEmbedding is not null ? IntentRepository.Map(wantRow, wantEmbedding) : null;
+            return new Candidate(
+                offer.MemberId, offer, want,
+                Compatible(requesterWant.Category, offer.Category),
+                Compatible(requesterWant.Industry, offer.Industry),
+                Compatible(requesterWant.Geography, offer.Geography),
+                Math.Clamp(1 - (now - offer.UpdatedAt).TotalDays / 90d, 0, 1));
+        }).ToArray();
+    }
+
+    private static Intent MapFunctionIntent(DbDataReader reader)
+    {
+        var updatedAt = reader.GetFieldValue<DateTimeOffset>(8);
+        return new Intent(
+            reader.GetString(0), reader.GetString(1), reader.GetString(2), Enum.Parse<IntentType>(reader.GetString(3), true),
+            reader.GetString(4), reader.GetString(4), DateTimeOffset.MaxValue, IntentStatus.MatchReady,
+            reader.GetFieldValue<Vector>(12).ToArray(), reader.GetString(9), "normalizer-v1",
+            reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(11).Trim(), "en", false,
+            updatedAt, updatedAt, string.Empty);
+    }
+
+    private static void AddVarchar(NpgsqlCommand command, string name, string value) =>
+        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Varchar) { Size = 64, Value = value });
 
     private async Task<List<string>> ExcludedFromProjection(string requesterId, string contextId, List<string> eligibleIds, CancellationToken ct) =>
         await db.RelationshipProjection.AsNoTracking()
@@ -354,6 +461,39 @@ public sealed class MatchResultRepository(NlpDbContext db) : IMatchResultReposit
 {
     public async Task<IReadOnlyList<RankedMatch>> SaveAsync(string requestId, string requesterId, IReadOnlyList<RankedMatch> matches, string modelVersion, string preprocessingVersion, string rankingVersion, CancellationToken ct)
     {
+        if (db.Database.IsRelational())
+        {
+            var payload = JsonSerializer.Serialize(matches.Select((match, index) => new
+            {
+                candidate_id = match.MemberId,
+                rank = index + 1,
+                semantic_score = match.SemanticScore,
+                reciprocal_score = match.ReciprocalScore,
+                final_score = match.Score,
+                label = match.Label.ToUpperInvariant(),
+                reason_codes = match.ReasonCodes,
+                reason_text = match.ReasonText,
+                model_version = modelVersion,
+                preprocessing_version = preprocessingVersion,
+                ranking_version = rankingVersion,
+                policy_status = "ELIGIBLE"
+            }));
+            var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+            var shouldClose = connection.State != ConnectionState.Open;
+            if (shouldClose) await connection.OpenAsync(ct);
+            try
+            {
+                await using var command = new NpgsqlCommand("SELECT nlp.save_match_results(@p_request_id, @p_requester_id, @p_results)", connection);
+                command.Parameters.Add(new NpgsqlParameter("p_request_id", NpgsqlDbType.Varchar) { Size = 64, Value = requestId });
+                command.Parameters.Add(new NpgsqlParameter("p_requester_id", NpgsqlDbType.Varchar) { Size = 64, Value = requesterId });
+                command.Parameters.Add(new NpgsqlParameter("p_results", NpgsqlDbType.Jsonb) { Value = payload });
+                await command.ExecuteNonQueryAsync(ct);
+            }
+            finally { if (shouldClose) await connection.CloseAsync(); }
+            var persisted = await db.MatchResults.AsNoTracking().Where(x => x.RequestId == requestId).OrderBy(x => x.Rank).ToListAsync(ct);
+            return persisted.Select(MatchRequestRepository.MapResult).ToArray();
+        }
+
         async Task<IReadOnlyList<RankedMatch>> PersistAsync()
         {
             var existing = await db.MatchResults.AsNoTracking().Where(x => x.RequestId == requestId).OrderBy(x => x.Rank).ToListAsync(ct);
@@ -375,16 +515,7 @@ public sealed class MatchResultRepository(NlpDbContext db) : IMatchResultReposit
             return rows.Select(MatchRequestRepository.MapResult).ToArray();
         }
 
-        if (!db.Database.IsRelational()) return await PersistAsync();
-        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
-        {
-            db.ChangeTracker.Clear();
-            // Serializable protects the idempotent request result set under concurrent retries.
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-            var result = await PersistAsync();
-            await transaction.CommitAsync(ct);
-            return result;
-        });
+        return await PersistAsync();
     }
 }
 
@@ -392,6 +523,25 @@ public sealed class FeedbackRepository(NlpDbContext db) : IFeedbackRepository
 {
     public async Task<FeedbackRecord> SaveAsync(long matchResultId, string requesterId, string label, string? reasonCode, string? reason, long? supersedesFeedbackId, CancellationToken ct)
     {
+        if (db.Database.IsRelational())
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+            await using var command = new NpgsqlCommand("SELECT nlp.save_feedback(@p_match_result_id, @p_requester_id, @p_label, @p_reason_code, @p_reason, @p_supersedes_feedback_id)", connection, (NpgsqlTransaction)transaction.GetDbTransaction());
+            command.Parameters.Add(new NpgsqlParameter("p_match_result_id", NpgsqlDbType.Bigint) { Value = matchResultId });
+            command.Parameters.Add(new NpgsqlParameter("p_requester_id", NpgsqlDbType.Varchar) { Size = 64, Value = requesterId });
+            command.Parameters.Add(new NpgsqlParameter("p_label", NpgsqlDbType.Varchar) { Size = 64, Value = label });
+            command.Parameters.Add(new NpgsqlParameter("p_reason_code", NpgsqlDbType.Varchar) { Size = 64, Value = reasonCode is null ? DBNull.Value : reasonCode });
+            command.Parameters.Add(new NpgsqlParameter("p_reason", NpgsqlDbType.Varchar) { Size = 1000, Value = reason is null ? DBNull.Value : reason });
+            command.Parameters.Add(new NpgsqlParameter("p_supersedes_feedback_id", NpgsqlDbType.Bigint) { Value = supersedesFeedbackId is null ? DBNull.Value : supersedesFeedbackId.Value });
+            var feedbackId = Convert.ToInt64(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+            var stored = await db.Feedback.AsNoTracking().SingleAsync(x => x.FeedbackId == feedbackId, ct);
+            IntentRepository.AddOutboxEvent(db, "MATCH_RESULT", matchResultId.ToString(System.Globalization.CultureInfo.InvariantCulture), "NlpFeedbackRecorded.v1", new { match_result_id = matchResultId, request_id = stored.RequestId, requester_id = requesterId, candidate_id = stored.CandidateId, label, reason_code = reasonCode });
+            await db.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+            return new FeedbackRecord(stored.FeedbackId, stored.MatchResultId, stored.RequesterId, stored.Label, stored.CreatedAt);
+        }
+
         var match = await db.MatchResults.AsNoTracking().SingleOrDefaultAsync(x => x.MatchResultId == matchResultId && x.RequesterId == requesterId, ct)
             ?? throw new DomainNotFoundException("MATCH_RESULT_NOT_FOUND");
 

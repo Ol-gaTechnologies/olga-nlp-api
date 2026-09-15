@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.OpenApi;
 using Npgsql;
 using Olga.Nlp.Api;
 using Olga.Nlp.Application;
@@ -23,7 +24,26 @@ builder.Services.AddOpenApi(options =>
     options.AddDocumentTransformer((document, _, _) =>
     {
         // Resolve against the Swagger page's origin so Azure HTTPS is preserved.
-        document.Servers = [new Microsoft.OpenApi.OpenApiServer { Url = "/" }];
+        document.Servers = [new OpenApiServer { Url = "/" }];
+
+        const string schemeName = "serviceToken";
+        document.Components ??= new OpenApiComponents();
+        document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+        document.Components.SecuritySchemes[schemeName] = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.ApiKey,
+            In = ParameterLocation.Header,
+            Name = "X-Service-Token",
+            Description = "Raw service credential; do not prefix it with Bearer."
+        };
+
+        var schemeReference = new OpenApiSecuritySchemeReference(schemeName, document, null);
+        foreach (var (path, pathItem) in document.Paths)
+        {
+            if (IsAnonymousEndpoint(new PathString(path))) continue;
+            foreach (var operation in pathItem.Operations.Values)
+                operation.Security = [new OpenApiSecurityRequirement { [schemeReference] = [] }];
+        }
         return Task.CompletedTask;
     });
 });
@@ -125,11 +145,7 @@ app.Use(async (context, next) =>
             return;
         }
 
-        var isAnonymousEndpoint = context.Request.Path.Equals("/health")
-            || context.Request.Path.Equals("/ready")
-            || context.Request.Path.StartsWithSegments("/swagger")
-            || context.Request.Path.StartsWithSegments("/openapi");
-        if (!isAnonymousEndpoint && !string.IsNullOrWhiteSpace(expectedServiceToken) && !TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken))
+        if (!IsAnonymousEndpoint(context.Request.Path) && !string.IsNullOrWhiteSpace(expectedServiceToken) && !TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken))
         {
             await WriteError(context, 401, "UNAUTHORIZED", "A valid service credential is required.");
             return;
@@ -254,6 +270,11 @@ static bool IsStateMutation(HttpRequest request) => request.Method == "POST" &&
      request.Path.StartsWithSegments("/v1/feedback") ||
      request.Path.Value?.Contains("/feedback", StringComparison.Ordinal) == true ||
      request.Path.StartsWithSegments("/v1/internal/evaluation-runs"));
+
+static bool IsAnonymousEndpoint(PathString path) => path.Equals("/health")
+    || path.Equals("/ready")
+    || path.StartsWithSegments("/swagger")
+    || path.StartsWithSegments("/openapi");
 
 static bool TryMember(HttpContext context, IConfiguration configuration, IWebHostEnvironment environment, out string memberId)
 {

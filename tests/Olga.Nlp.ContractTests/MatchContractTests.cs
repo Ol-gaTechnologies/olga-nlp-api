@@ -45,4 +45,14 @@ public sealed class MatchContractTests : IClassFixture<WebApplicationFactory<Pro
         Assert.Equal(created.Matches.Count, status.Matches.Count);
         Assert.All(status.Matches, x => Assert.True(x.MatchResultId > 0));
     }
+
+    [Fact]
+    public async Task OpenApi_server_resolves_against_the_https_browser_origin()
+    {
+        using var response = await client.GetAsync("/openapi/v1.json");
+        response.EnsureSuccessStatusCode();
+        using var document = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        var server = Assert.Single(document.RootElement.GetProperty("servers").EnumerateArray());
+        Assert.Equal("/", server.GetProperty("url").GetString());
+    }
 }

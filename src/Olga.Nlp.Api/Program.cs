@@ -18,7 +18,15 @@ builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
     o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        // Resolve against the Swagger page's origin so Azure HTTPS is preserved.
+        document.Servers = [new Microsoft.OpenApi.OpenApiServer { Url = "/" }];
+        return Task.CompletedTask;
+    });
+});
 builder.Services.AddHealthChecks();
 builder.Services.AddHttpsRedirection(options =>
 {

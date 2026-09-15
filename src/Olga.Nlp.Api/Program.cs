@@ -104,8 +104,11 @@ app.Use(async (context, next) =>
             return;
         }
 
-        var isProbe = context.Request.Path.Equals("/health") || context.Request.Path.Equals("/ready");
-        if (!isProbe && !string.IsNullOrWhiteSpace(expectedServiceToken) && !TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken))
+        var isAnonymousEndpoint = context.Request.Path.Equals("/health")
+            || context.Request.Path.Equals("/ready")
+            || context.Request.Path.StartsWithSegments("/swagger")
+            || context.Request.Path.StartsWithSegments("/openapi");
+        if (!isAnonymousEndpoint && !string.IsNullOrWhiteSpace(expectedServiceToken) && !TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken))
         {
             await WriteError(context, 401, "UNAUTHORIZED", "A valid service credential is required.");
             return;

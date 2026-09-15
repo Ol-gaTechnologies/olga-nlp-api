@@ -79,6 +79,13 @@ var expectedServiceToken = app.Configuration["ServiceAuthorization:Token"];
 if (!useInMemory && string.IsNullOrWhiteSpace(expectedServiceToken))
     throw new InvalidOperationException("ServiceAuthorization:Token is required when PostgreSQL is configured.");
 
+app.UseSwaggerUI(options =>
+{
+    options.RoutePrefix = "swagger";
+    options.SwaggerEndpoint("/openapi/v1.json", "OLGA NLP API v1");
+    options.DocumentTitle = "OLGA NLP API";
+});
+
 app.Use(async (context, next) =>
 {
     context.Response.Headers["X-Correlation-Id"] = context.TraceIdentifier;
@@ -124,6 +131,7 @@ app.Use(async (context, next) =>
 });
 
 app.MapOpenApi();
+app.MapGet("/", () => Results.Redirect("/swagger"));
 app.MapHealthChecks("/health");
 app.MapGet("/ready", async (NlpDbContext db, CancellationToken ct) =>
     await db.Database.CanConnectAsync(ct) ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503));

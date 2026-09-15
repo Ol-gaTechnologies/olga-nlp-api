@@ -20,6 +20,11 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 });
 builder.Services.AddOpenApi();
 builder.Services.AddHealthChecks();
+builder.Services.AddHttpsRedirection(options =>
+{
+    options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+    options.HttpsPort = builder.Environment.IsDevelopment() ? 7043 : 443;
+});
 
 var connection = builder.Configuration.GetConnectionString("PostgreSql");
 var useInMemory = string.IsNullOrWhiteSpace(connection);
@@ -78,6 +83,14 @@ var app = builder.Build();
 var expectedServiceToken = app.Configuration["ServiceAuthorization:Token"];
 if (!useInMemory && string.IsNullOrWhiteSpace(expectedServiceToken))
     throw new InvalidOperationException("ServiceAuthorization:Token is required when PostgreSQL is configured.");
+
+if (!app.Environment.IsDevelopment())
+    app.UseHsts();
+
+// Azure Container Apps enforces HTTPS at its ingress. Other hosts, including
+// local Development, are redirected by ASP.NET Core.
+if (!app.Configuration.GetValue("Hosting:AzureContainerAppsIngress", false))
+    app.UseHttpsRedirection();
 
 app.UseSwaggerUI(options =>
 {

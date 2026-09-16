@@ -141,8 +141,15 @@ jobs:
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$image_ref" \
+            --set-env-vars Hosting__AzureContainerAppsIngress=true \
             --revision-suffix "$revision_suffix" \
             --output none
+          az containerapp ingress update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --allow-insecure false \
+            --output none
+
 
           revision=$(az containerapp show \
             --name "$CONTAINER_APP_NAME" \

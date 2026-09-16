@@ -28,6 +28,12 @@ public sealed class MatchingIntegrationTests
         Assert.Equal("vector(1536)", embedding.FindProperty(nameof(NlpEmbeddingRow.Embedding))!.GetColumnType());
         Assert.Equal(8, result.FindProperty(nameof(NlpMatchResultRow.FinalScore))!.GetPrecision());
         Assert.Equal(7, result.FindProperty(nameof(NlpMatchResultRow.FinalScore))!.GetScale());
+        Assert.Equal("jsonb", result.FindProperty(nameof(NlpMatchResultRow.ReasonCodes))!.GetColumnType());
+        Assert.Equal("jsonb", db.Model.FindEntityType(typeof(NlpMatchRequestRow))!.FindProperty(nameof(NlpMatchRequestRow.RequestOptionsJson))!.GetColumnType());
+        Assert.Equal("jsonb", db.Model.FindEntityType(typeof(OutboxEventRow))!.FindProperty(nameof(OutboxEventRow.PayloadJson))!.GetColumnType());
+        Assert.Null(db.Model.FindEntityType(typeof(NlpMatchRequestRow))!.FindProperty(nameof(NlpMatchRequestRow.ErrorCode)));
+        Assert.True(db.Model.FindEntityType(typeof(NlpModelVersionRow))!.FindProperty(nameof(NlpModelVersionRow.RowVersion))!.IsConcurrencyToken);
+        Assert.True(db.Model.FindEntityType(typeof(NlpRankingConfigRow))!.FindProperty(nameof(NlpRankingConfigRow.RowVersion))!.IsConcurrencyToken);
     }
 
     [Fact]

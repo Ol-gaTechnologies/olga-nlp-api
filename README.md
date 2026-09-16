@@ -15,7 +15,7 @@ The NLP API owns:
 - idempotent match requests, ranked results, explanations, feedback, suppression, and evaluation;
 - bounded candidate retrieval through approved read-only projections.
 
-The NLP API must not update Core Product API tables or infer permission from a score. Production eligibility is read from `nlp.vw_MemberContextEligibility` and `nlp.vw_MemberRelationship`, which the database implementation derives from authoritative IAM, profile, consent, event, Live Mode, connection, and block state. Local InMemory fixtures use stand-alone tables behind the same repository interface.
+The NLP API must not update Core Product API tables or infer permission from a score. Production eligibility is read from `nlp.vw_member_context_eligibility` and `nlp.vw_member_relationship`, which the database implementation derives from authoritative IAM, profile, consent, event, Live Mode, connection, and block state. Local InMemory fixtures use stand-alone tables behind the same repository interface.
 
 Cross-API effects use the transactional `ops.OutboxEvent`. NLP emits `NlpIntentNormalized.v1`, `NlpIntentMatchReady.v1`, `NlpMatchRequestCompleted.v1`, `NlpFeedbackRecorded.v1`, and `NlpEvaluationRunCompleted.v1` with minimal metadata and no raw intent, feedback, or evaluation sample text. The Core Product API/its workers consume those events to drive notifications, mobile projections, analytics, privacy, or other product workflows.
 
@@ -62,7 +62,7 @@ All WANT and OFFER vectors in a comparison must use the same active model versio
 
 ## API contracts
 
-Member endpoints derive identity from the `sub` claim. When the Core Product API calls NLP internally, it may forward `X-Actor-Member-Id` only over the service-authenticated boundary. `X-Member-Id` is accepted only in the Development environment when explicitly enabled.
+All endpoints are anonymous for the initial MVP. Member-scoped endpoints use the optional `X-Member-Id` header and otherwise fall back to `Mvp__DefaultMemberId` (`A123` by default). Do not treat this selector as authentication; restore verified caller and evaluator identities before exposing sensitive data beyond the controlled MVP environment.
 
 - `POST /v1/intents`
 - `GET /v1/intents/{intentId}`
@@ -88,14 +88,14 @@ Each returned result carries its persisted `match_result_id`, 1-based rank, sema
 
 Feedback labels are controlled: `USEFUL`, `NOT_USEFUL`, or `INAPPROPRIATE`. Corrections append a new row referencing the immediately previous feedback. They never overwrite history. Free-text feedback is length limited and rejected when contact-style PII is detected.
 
-Evaluation runs require `nlp.evaluate`, the `NLP_EVALUATOR` role, or the authenticated internal-service boundary. They read only `APPROVED` datasets and `TEST` samples, persist the exact model/ranking versions, and return aggregate metrics rather than sample text or private report locations.
+Evaluation runs are anonymous during the initial MVP. They still read only `APPROVED` datasets and `TEST` samples, persist the exact model/ranking versions, and return aggregate metrics rather than sample text or private report locations.
 
 ## Production configuration
 
 - Configure `ConnectionStrings__PostgreSql` for the PgBouncer endpoint and set `EmbeddingProcessing__Mode=Queued`.
 - Implement `AzureEmbeddingProvider` with the approved Azure OpenAI deployment and managed identity.
-- Configure `ServiceAuthorization__Token` or replace the service boundary with the approved workload-identity mechanism.
-- Keep API/worker/migration database identities separate and grant least privilege by schema/procedure.
+- Restore the approved workload-identity mechanism before expanding access beyond the controlled MVP environment.
+- Keep API/worker/migration database identities separate and grant least privilege by schema/function.
 - Keep intent text, vectors, identity values, presence, provider payloads, and feedback text out of telemetry.
 - Use private endpoints, Key Vault, Application Insights/OpenTelemetry, retry/dead-letter monitoring, and the approved retention/privacy workflows.
 

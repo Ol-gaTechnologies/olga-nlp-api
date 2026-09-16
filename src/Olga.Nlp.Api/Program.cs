@@ -1,9 +1,8 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.OpenApi;
 using Npgsql;
 using Olga.Nlp.Api;
 using Olga.Nlp.Application;
@@ -13,13 +12,28 @@ using Olga.Nlp.Infrastructure;
 using Pgvector.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
+var defaultMemberId = builder.Configuration["Mvp:DefaultMemberId"] ?? "A123";
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
     o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
     o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        // Resolve against the Swagger page's origin so Azure HTTPS is preserved.
+        document.Servers = [new OpenApiServer { Url = "/" }];
+
+        return Task.CompletedTask;
+    });
+});
 builder.Services.AddHealthChecks();
+builder.Services.AddHttpsRedirection(options =>
+{
+    options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+    options.HttpsPort = builder.Environment.IsDevelopment() ? 7043 : 443;
+});
 
 var connection = builder.Configuration.GetConnectionString("PostgreSql");
 var useInMemory = string.IsNullOrWhiteSpace(connection);
@@ -75,9 +89,21 @@ else
     builder.Services.AddScoped<IIntentProcessingDispatcher, QueuedIntentProcessingDispatcher>();
 
 var app = builder.Build();
-var expectedServiceToken = app.Configuration["ServiceAuthorization:Token"];
-if (!useInMemory && string.IsNullOrWhiteSpace(expectedServiceToken))
-    throw new InvalidOperationException("ServiceAuthorization:Token is required when PostgreSQL is configured.");
+
+if (!app.Environment.IsDevelopment())
+    app.UseHsts();
+
+// Azure Container Apps enforces HTTPS at its ingress. Other hosts, including
+// local Development, are redirected by ASP.NET Core.
+if (!app.Configuration.GetValue("Hosting:AzureContainerAppsIngress", false))
+    app.UseHttpsRedirection();
+
+app.UseSwaggerUI(options =>
+{
+    options.RoutePrefix = "swagger";
+    options.SwaggerEndpoint("/openapi/v1.json", "OLGA NLP API v1");
+    options.DocumentTitle = "OLGA NLP API";
+});
 
 app.Use(async (context, next) =>
 {
@@ -90,10 +116,10 @@ app.Use(async (context, next) =>
             return;
         }
 
-        var isProbe = context.Request.Path.Equals("/health") || context.Request.Path.Equals("/ready");
-        if (!isProbe && !string.IsNullOrWhiteSpace(expectedServiceToken) && !TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken))
+        var idempotencyKey = context.Request.Headers["Idempotency-Key"].ToString();
+        if (IsStateMutation(context.Request) && (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 128))
         {
-            await WriteError(context, 401, "UNAUTHORIZED", "A valid service credential is required.");
+            await WriteError(context, 400, "IDEMPOTENCY_KEY_REQUIRED", SafeMessage("IDEMPOTENCY_KEY_REQUIRED"));
             return;
         }
 
@@ -105,6 +131,11 @@ app.Use(async (context, next) =>
     catch (DbUpdateException exception) when (exception.InnerException is PostgresException postgres && IsTransientDatabaseState(postgres.SqlState)) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (RetryLimitExceededException) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (PostgresException exception) when (IsTransientDatabaseState(exception.SqlState)) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation) { await WriteError(context, 409, "RESOURCE_CONFLICT", SafeMessage("RESOURCE_CONFLICT")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation) { await WriteError(context, 409, "RESOURCE_STATE_CONFLICT", SafeMessage("RESOURCE_STATE_CONFLICT")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege) { await WriteError(context, 403, "RESOURCE_FORBIDDEN", SafeMessage("RESOURCE_FORBIDDEN")); }
+    catch (PostgresException exception) when (exception.SqlState == "P0002") { await WriteError(context, 404, "RESOURCE_NOT_FOUND", SafeMessage("RESOURCE_NOT_FOUND")); }
+    catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InvalidParameterValue) { await WriteError(context, 400, "REQUEST_INVALID", SafeMessage("REQUEST_INVALID")); }
     catch (NpgsqlException exception) when (exception.IsTransient) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (DomainNotFoundException exception) { await WriteError(context, 404, exception.Code, SafeMessage(exception.Code)); }
     catch (ArgumentException exception) { await WriteError(context, 400, exception.Message, SafeMessage(exception.Message)); }
@@ -112,13 +143,14 @@ app.Use(async (context, next) =>
 });
 
 app.MapOpenApi();
+app.MapGet("/", () => Results.Redirect("/swagger"));
 app.MapHealthChecks("/health");
 app.MapGet("/ready", async (NlpDbContext db, CancellationToken ct) =>
     await db.Database.CanConnectAsync(ct) ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503));
 
 app.MapPost("/v1/intents", async (HttpContext context, IntentUpsertRequest request, IIntentService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     var response = await service.SaveAsync(memberId, request, context.Request.Headers.IfMatch.FirstOrDefault(), ct);
     if (!string.IsNullOrWhiteSpace(response.ETag)) context.Response.Headers.ETag = response.ETag;
     return response.Status == "PROCESSING" ? Results.Accepted($"/v1/intents/{response.IntentId}", response) : Results.Ok(response);
@@ -126,7 +158,7 @@ app.MapPost("/v1/intents", async (HttpContext context, IntentUpsertRequest reque
 
 app.MapGet("/v1/intents/{intentId}", async (HttpContext context, string intentId, IIntentService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     var response = await service.GetAsync(memberId, intentId, ct);
     if (response is null) return await ErrorResult(context, 404, "INTENT_NOT_FOUND");
     context.Response.Headers.ETag = response.ETag;
@@ -135,7 +167,7 @@ app.MapGet("/v1/intents/{intentId}", async (HttpContext context, string intentId
 
 app.MapPost("/v1/match-requests", async (HttpContext context, MatchSearchRequest body, IMatchingService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     var idempotencyKey = context.Request.Headers["Idempotency-Key"].FirstOrDefault();
     if (string.IsNullOrWhiteSpace(idempotencyKey)) return await ErrorResult(context, 400, "IDEMPOTENCY_KEY_REQUIRED");
     if (!string.IsNullOrWhiteSpace(body.RequestId) && !string.Equals(body.RequestId, idempotencyKey, StringComparison.Ordinal)) return await ErrorResult(context, 409, "IDEMPOTENCY_KEY_MISMATCH");
@@ -148,27 +180,27 @@ app.MapPost("/v1/match-requests", async (HttpContext context, MatchSearchRequest
 // Backward-compatible synchronous endpoint. New clients should use /v1/match-requests.
 app.MapPost("/v1/matches/search", async (HttpContext context, MatchSearchRequest request, IMatchingService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     if (!ValidMatchRequest(request)) return await ErrorResult(context, 400, "MATCH_REQUEST_INVALID");
     return Results.Ok(await service.SearchAsync(memberId, request, ct));
 });
 
 app.MapGet("/v1/match-requests/{requestId}", async (HttpContext context, string requestId, IMatchingService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     var response = await service.GetAsync(memberId, requestId, ct);
     return response is null ? await ErrorResult(context, 404, "MATCH_REQUEST_NOT_FOUND") : Results.Ok(response);
 });
 
 app.MapPost("/v1/matches/{matchResultId:long}/feedback", async (HttpContext context, long matchResultId, FeedbackCreateRequest request, IFeedbackService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     return Results.Created($"/v1/matches/{matchResultId}/feedback", await service.SaveAsync(matchResultId, memberId, request, ct));
 });
 
 app.MapPost("/v1/feedback", async (HttpContext context, FeedbackRequest request, IFeedbackService service, CancellationToken ct) =>
 {
-    if (!TryMember(context, app.Configuration, app.Environment, out var memberId)) return await ErrorResult(context, 401, "MEMBER_IDENTITY_REQUIRED");
+    var memberId = Member(context, defaultMemberId);
     return Results.Created("/v1/feedback", await service.SaveLegacyAsync(memberId, request, ct));
 });
 
@@ -181,7 +213,6 @@ app.MapPost("/v1/normalize", (NormalizeRequest request, ITextNormalizer normaliz
 
 app.MapPost("/v1/internal/evaluation-runs", async (HttpContext context, EvaluationRunRequest request, IEvaluationService service, CancellationToken ct) =>
 {
-    if (!CanEvaluate(context, app.Environment, expectedServiceToken)) return await ErrorResult(context, 403, "NLP_EVALUATOR_REQUIRED");
     var idempotencyKey = context.Request.Headers["Idempotency-Key"].FirstOrDefault();
     if (string.IsNullOrWhiteSpace(idempotencyKey)) return await ErrorResult(context, 400, "IDEMPOTENCY_KEY_REQUIRED");
     var response = await service.RunAsync(idempotencyKey, request, ct);
@@ -190,7 +221,6 @@ app.MapPost("/v1/internal/evaluation-runs", async (HttpContext context, Evaluati
 
 app.MapGet("/v1/internal/evaluation-runs/{evaluationRunId}", async (HttpContext context, string evaluationRunId, IEvaluationService service, CancellationToken ct) =>
 {
-    if (!CanEvaluate(context, app.Environment, expectedServiceToken)) return await ErrorResult(context, 403, "NLP_EVALUATOR_REQUIRED");
     var response = await service.GetAsync(evaluationRunId, ct);
     return response is null ? await ErrorResult(context, 404, "EVALUATION_RUN_NOT_FOUND") : Results.Ok(response);
 });
@@ -203,21 +233,18 @@ static bool ValidMatchRequest(MatchSearchRequest request) =>
     !string.IsNullOrWhiteSpace(request.ContextId) && request.Limit is >= 3 and <= 7 &&
     (request.Options?.Threshold is null or >= 0 and <= 1);
 
-static bool TryMember(HttpContext context, IConfiguration configuration, IWebHostEnvironment environment, out string memberId)
-{
-    memberId = context.User.FindFirst("sub")?.Value ?? string.Empty;
-    if (string.IsNullOrWhiteSpace(memberId) && configuration.GetValue("Identity:AllowTrustedActorHeader", true) && !string.IsNullOrWhiteSpace(configuration["ServiceAuthorization:Token"]))
-        memberId = context.Request.Headers["X-Actor-Member-Id"].ToString();
-    if (string.IsNullOrWhiteSpace(memberId) && environment.IsDevelopment() && configuration.GetValue("Identity:AllowLocalMemberHeader", false))
-        memberId = context.Request.Headers["X-Member-Id"].ToString();
-    return !string.IsNullOrWhiteSpace(memberId);
-}
+static bool IsStateMutation(HttpRequest request) => request.Method == "POST" &&
+    (request.Path.StartsWithSegments("/v1/intents") ||
+     request.Path.StartsWithSegments("/v1/match-requests") ||
+     request.Path.StartsWithSegments("/v1/matches/search") ||
+     request.Path.StartsWithSegments("/v1/feedback") ||
+     request.Path.Value?.Contains("/feedback", StringComparison.Ordinal) == true ||
+     request.Path.StartsWithSegments("/v1/internal/evaluation-runs"));
 
-static bool TokenMatches(string supplied, string expected)
+static string Member(HttpContext context, string defaultMemberId)
 {
-    var left = Encoding.UTF8.GetBytes(supplied);
-    var right = Encoding.UTF8.GetBytes(expected);
-    return left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+    var memberId = context.Request.Headers["X-Member-Id"].FirstOrDefault();
+    return !string.IsNullOrWhiteSpace(memberId) ? memberId : defaultMemberId;
 }
 
 static bool IsTransientDatabaseState(string sqlState) => sqlState is
@@ -225,15 +252,6 @@ static bool IsTransientDatabaseState(string sqlState) => sqlState is
     PostgresErrorCodes.DeadlockDetected or
     PostgresErrorCodes.LockNotAvailable or
     PostgresErrorCodes.QueryCanceled;
-
-static bool CanEvaluate(HttpContext context, IWebHostEnvironment environment, string? expectedServiceToken)
-{
-    if (environment.IsDevelopment()) return true;
-    var scopes = context.User.FindFirst("scope")?.Value?.Split(' ', StringSplitOptions.RemoveEmptyEntries) ?? [];
-    var roles = context.User.FindAll("roles").Select(x => x.Value);
-    if (scopes.Contains("nlp.evaluate", StringComparer.Ordinal) || roles.Contains("NLP_EVALUATOR", StringComparer.Ordinal)) return true;
-    return !string.IsNullOrWhiteSpace(expectedServiceToken) && TokenMatches(context.Request.Headers["X-Service-Token"].ToString(), expectedServiceToken);
-}
 
 static async Task<IResult> ErrorResult(HttpContext context, int status, string code)
 {
@@ -256,12 +274,10 @@ static string SafeMessage(string code) => code switch
     "IDEMPOTENCY_KEY_MISMATCH" => "The request ID and Idempotency-Key must match.",
     "IF_MATCH_REQUIRED" => "An If-Match header is required when updating an intent.",
     "RESOURCE_VERSION_CONFLICT" => "The resource changed since it was read.",
-    "MEMBER_IDENTITY_REQUIRED" => "An authenticated member identity is required.",
     "INTENT_NOT_FOUND" => "The requested intent was not found.",
     "MATCH_REQUEST_NOT_FOUND" => "The requested match execution was not found.",
     "MATCH_RESULT_NOT_FOUND" => "The requested match result was not found.",
     "FEEDBACK_PII_DETECTED" => "Feedback text must not contain contact information.",
-    "NLP_EVALUATOR_REQUIRED" => "NLP evaluator permission is required.",
     "EVALUATION_RUN_NOT_FOUND" => "The requested evaluation run was not found.",
     "EVALUATION_DATASET_NOT_APPROVED" => "The evaluation dataset is not approved.",
     "EVALUATION_DATASET_EMPTY" => "The approved evaluation dataset has no test samples.",

@@ -83,6 +83,8 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.PreprocessingVersion).HasMaxLength(128);
             e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("CANDIDATE");
             e.Property(x => x.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.Property(x => x.UpdatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.Property(x => x.RowVersion).HasDefaultValue(1L).IsConcurrencyToken().ValueGeneratedOnAddOrUpdate();
         });
         b.Entity<NlpRankingConfigRow>(e =>
         {
@@ -96,7 +98,10 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.FreshnessWeight).HasPrecision(6, 5).HasDefaultValue(0.10m);
             e.Property(x => x.EventWeight).HasPrecision(6, 5).HasDefaultValue(0m);
             e.Property(x => x.Threshold).HasPrecision(6, 5).HasDefaultValue(0.35m);
-            e.Property(x => x.ConfigJson).HasMaxLength(2000);
+            e.Property(x => x.ConfigJson).HasColumnType("jsonb");
+            e.Property(x => x.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.Property(x => x.UpdatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.Property(x => x.RowVersion).HasDefaultValue(1L).IsConcurrencyToken().ValueGeneratedOnAddOrUpdate();
         });
         b.Entity<NlpProcessingJobRow>(e =>
         {
@@ -127,13 +132,13 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.ContextId).HasMaxLength(64);
             e.Property(x => x.LanguageCode).HasMaxLength(16).HasDefaultValue("en");
             e.Property(x => x.RequestedLimit).HasDefaultValue((short)7);
-            e.Property(x => x.RequestOptionsJson).HasMaxLength(2000);
+            e.Property(x => x.RequestOptionsJson).HasColumnType("jsonb");
             e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("PROCESSING");
             e.Property(x => x.PreprocessingVersion).HasMaxLength(128);
             e.Property(x => x.ModelVersion).HasMaxLength(128);
             e.Property(x => x.RankingVersion).HasMaxLength(128);
             e.Property(x => x.RankingThreshold).HasPrecision(6, 5);
-            e.Property(x => x.ErrorCode).HasMaxLength(64);
+            e.Ignore(x => x.ErrorCode);
             e.Property(x => x.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             e.Property(x => x.UpdatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             e.Property(x => x.RowVersion).HasDefaultValue(1L).IsConcurrencyToken().ValueGeneratedOnAddOrUpdate();
@@ -152,7 +157,7 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.ReciprocalScore).HasPrecision(8, 7);
             e.Property(x => x.FinalScore).HasPrecision(8, 7);
             e.Property(x => x.Label).HasMaxLength(32);
-            e.Property(x => x.ReasonCodes).HasMaxLength(1000);
+            e.Property(x => x.ReasonCodes).HasColumnType("jsonb");
             e.Property(x => x.ReasonText).HasMaxLength(2000);
             e.Property(x => x.ModelVersion).HasMaxLength(128);
             e.Property(x => x.PreprocessingVersion).HasMaxLength(128);
@@ -214,7 +219,7 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.DatasetId).HasMaxLength(64);
             e.Property(x => x.RequesterIntentText).HasMaxLength(4000);
             e.Property(x => x.CandidateIntentText).HasMaxLength(4000);
-            e.Property(x => x.StructuredFeaturesJson).HasMaxLength(2000);
+            e.Property(x => x.StructuredFeaturesJson).HasColumnType("jsonb");
             e.Property(x => x.GoldLabel).HasMaxLength(32);
             e.Property(x => x.Split).HasMaxLength(16);
             e.Property(x => x.OrganizationGroup).HasMaxLength(64);
@@ -231,7 +236,7 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.ModelVersion).HasMaxLength(128);
             e.Property(x => x.RankingVersion).HasMaxLength(128);
             e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("RUNNING");
-            e.Property(x => x.MetricsJson).HasColumnType("text");
+            e.Property(x => x.MetricsJson).HasColumnType("jsonb");
             e.Property(x => x.ErrorReportBlobPath).HasMaxLength(1024);
             e.Property(x => x.StartedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
         });
@@ -244,7 +249,7 @@ public sealed class NlpDbContext(DbContextOptions<NlpDbContext> options) : DbCon
             e.Property(x => x.AggregateType).HasMaxLength(64);
             e.Property(x => x.AggregateId).HasMaxLength(64);
             e.Property(x => x.EventType).HasMaxLength(128);
-            e.Property(x => x.PayloadJson).HasColumnType("text");
+            e.Property(x => x.PayloadJson).HasColumnType("jsonb");
             e.Property(x => x.OccurredAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             e.Property(x => x.AttemptCount).HasDefaultValue(0);
         });
@@ -368,6 +373,8 @@ public sealed class NlpModelVersionRow
     public string Status { get; set; } = "CANDIDATE";
     public DateTimeOffset? ActivatedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public long RowVersion { get; set; }
 }
 
 public sealed class NlpRankingConfigRow
@@ -383,6 +390,9 @@ public sealed class NlpRankingConfigRow
     public string? ConfigJson { get; set; }
     public DateTimeOffset ActiveFrom { get; set; }
     public DateTimeOffset? ActiveTo { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public long RowVersion { get; set; }
 }
 
 public sealed class NlpProcessingJobRow

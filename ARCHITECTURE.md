@@ -55,13 +55,13 @@ Caller -> POST /v1/match-requests + Idempotency-Key
   -> return only the requested top 3-7; never return vectors or policy internals
 ```
 
-In the integrated database, `nlp.vw_MemberContextEligibility` and `nlp.vw_MemberRelationship` must be read-only projections derived from Core-owned IAM, consent, event, social, and moderation state. Stand-alone local tables are test fixtures behind the same repository interface, not production authorities.
+In the integrated database, `nlp.vw_member_context_eligibility` and `nlp.vw_member_relationship` must be read-only projections derived from Core-owned IAM, consent, event, social, and moderation state. Stand-alone local tables are test fixtures behind the same repository interface, not production authorities.
 
 ## Feedback and evaluation flow
 
 Feedback is attached to a persisted match result owned by the authenticated requester. Labels are controlled (`USEFUL`, `NOT_USEFUL`, `INAPPROPRIATE`). Corrections append a row that references the immediately superseded feedback; history is never overwritten. Free text is bounded and rejected when contact-style PII is detected.
 
-Evaluation endpoints require evaluator permission or the authenticated service boundary. Runs use only approved datasets and TEST samples, bind exact model/ranking versions, store aggregate metrics, and emit `NlpEvaluationRunCompleted.v1` without exposing sample text or private report paths.
+Evaluation endpoints are anonymous during the initial MVP. Runs still use only approved datasets and TEST samples, bind exact model/ranking versions, store aggregate metrics, and emit `NlpEvaluationRunCompleted.v1` without exposing sample text or private report paths.
 
 ## Cross-API data flow
 
@@ -87,6 +87,12 @@ Other NLP events are `NlpIntentNormalized.v1`, `NlpIntentMatchReady.v1`, `NlpFee
 - Telemetry excludes intent text, vectors, presence, relationship direction, provider payloads, and feedback text.
 - Workers require bounded retries, leases, dead-letter monitoring, and idempotent state transitions.
 
+## PostgreSQL v2.4 integration
+
+Relational matching uses `nlp.get_requester_intent` and `nlp.get_eligible_candidates` through typed Npgsql parameters. Eligibility and suppression therefore bound the candidate set to 50–200 rows before PostgreSQL applies exact cosine distance. Match results and feedback are persisted through `nlp.save_match_results` and `nlp.save_feedback`; no ANN index is used.
+
+JSON documents map to `jsonb`, embeddings map to `vector(1536)`, and mutable configuration/model/request rows use trigger-generated `bigint row_version`. Stateful `/v1` POST operations require a bounded `Idempotency-Key`. Because the current candidate function selects the latest active requester WANT, the API fails closed when a caller asks to match an older WANT rather than selecting candidates with one embedding and ranking them with another.
+
 ## Current readiness
 
-The repository currently passes 4 unit, 6 integration, and 3 contract tests. Production gaps remain: configure OIDC/JWT authentication and authorization, implement the Azure embedding provider, supply version-controlled integrated database migrations/views/grants, complete workload identity and transport publishing, and add production observability/load/failure evidence. The cross-solution assessment and release gates are in `D:\OLGA\Projects\Olga.Core\docs\SENIOR_ARCHITECT_REVIEW.md`.
+The repository currently passes 4 unit, 7 integration, and 3 contract tests. Production gaps remain: configure OIDC/JWT authentication and authorization, implement the Azure embedding provider, complete workload identity and transport publishing, and add production observability/load/failure evidence. The cross-solution assessment and release gates are in `D:\OLGA\Projects\Olga.Core\docs\SENIOR_ARCHITECT_REVIEW.md`.

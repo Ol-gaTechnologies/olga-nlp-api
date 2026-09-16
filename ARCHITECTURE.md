@@ -61,7 +61,7 @@ In the integrated database, `nlp.vw_member_context_eligibility` and `nlp.vw_memb
 
 Feedback is attached to a persisted match result owned by the authenticated requester. Labels are controlled (`USEFUL`, `NOT_USEFUL`, `INAPPROPRIATE`). Corrections append a row that references the immediately superseded feedback; history is never overwritten. Free text is bounded and rejected when contact-style PII is detected.
 
-Evaluation endpoints require evaluator permission or the authenticated service boundary. Runs use only approved datasets and TEST samples, bind exact model/ranking versions, store aggregate metrics, and emit `NlpEvaluationRunCompleted.v1` without exposing sample text or private report paths.
+Evaluation endpoints are anonymous during the initial MVP. Runs still use only approved datasets and TEST samples, bind exact model/ranking versions, store aggregate metrics, and emit `NlpEvaluationRunCompleted.v1` without exposing sample text or private report paths.
 
 ## Cross-API data flow
 

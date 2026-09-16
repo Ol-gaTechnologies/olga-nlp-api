@@ -40,8 +40,9 @@ builder.Services.AddOpenApi(options =>
         var schemeReference = new OpenApiSecuritySchemeReference(schemeName, document, null);
         foreach (var (path, pathItem) in document.Paths)
         {
-            if (IsAnonymousEndpoint(new PathString(path))) continue;
-            foreach (var operation in pathItem.Operations.Values)
+            var operations = pathItem.Operations;
+            if (IsAnonymousEndpoint(new PathString(path)) || operations is null) continue;
+            foreach (var operation in operations.Values)
                 operation.Security = [new OpenApiSecurityRequirement { [schemeReference] = [] }];
         }
         return Task.CompletedTask;

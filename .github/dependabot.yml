@@ -8,6 +8,10 @@ updates:
     groups:
       dotnet-dependencies:
         patterns: ["*"]
+    ignore:
+      # Microsoft.AspNetCore.OpenApi 10.x requires Microsoft.OpenApi 2.x.
+      - dependency-name: Microsoft.OpenApi
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

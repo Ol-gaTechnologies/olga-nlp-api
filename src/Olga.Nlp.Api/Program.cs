@@ -13,6 +13,7 @@ using Pgvector.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 var defaultMemberId = builder.Configuration["Mvp:DefaultMemberId"] ?? "A123";
+var includeExceptionDetails = builder.Configuration.GetValue<bool>("Diagnostics:IncludeExceptionDetails");
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
     o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
@@ -139,7 +140,11 @@ app.Use(async (context, next) =>
     catch (NpgsqlException exception) when (exception.IsTransient) { await WriteError(context, 503, "DATABASE_TRANSIENT_FAILURE", SafeMessage("DATABASE_TRANSIENT_FAILURE")); }
     catch (DomainNotFoundException exception) { await WriteError(context, 404, exception.Code, SafeMessage(exception.Code)); }
     catch (ArgumentException exception) { await WriteError(context, 400, exception.Message, SafeMessage(exception.Message)); }
-    catch (Exception) { await WriteError(context, 500, "INTERNAL_ERROR", "The request could not be completed."); }
+    catch (Exception exception)
+    {
+        app.Logger.LogError(exception, "Unhandled exception for {Method} {Path}; correlation ID {CorrelationId}", context.Request.Method, context.Request.Path, context.TraceIdentifier);
+        await WriteError(context, 500, "INTERNAL_ERROR", exception.GetBaseException().Message, includeExceptionDetails ? exception : null);
+    }
 });
 
 app.MapOpenApi();
@@ -259,12 +264,12 @@ static async Task<IResult> ErrorResult(HttpContext context, int status, string c
     return Results.Json(new ApiError(code, SafeMessage(code), context.TraceIdentifier), statusCode: status, contentType: "application/problem+json");
 }
 
-static async Task WriteError(HttpContext context, int status, string code, string message)
+static async Task WriteError(HttpContext context, int status, string code, string message, Exception? exception = null)
 {
     if (context.Response.HasStarted) return;
     context.Response.StatusCode = status;
     context.Response.ContentType = "application/problem+json";
-    await context.Response.WriteAsJsonAsync(new ApiError(code, message, context.TraceIdentifier));
+    await context.Response.WriteAsJsonAsync(new ApiError(code, message, context.TraceIdentifier, StackTrace: exception?.ToString()));
 }
 
 static string SafeMessage(string code) => code switch

@@ -78,7 +78,7 @@ All endpoints are anonymous for the initial MVP. Member-scoped endpoints use the
 - `GET /health`
 - `GET /ready`
 
-Externally retryable mutations use `Idempotency-Key`. Intent updates use `If-Match`/ETag. Errors contain `code`, safe `message`, and `correlation_id`. Responses never expose vectors, raw identity subjects, member presence cells, block direction, provider payloads, or moderation detail.
+Externally retryable mutations use `Idempotency-Key`. Intent updates use `If-Match`/ETag. Errors contain `code`, `message`, and `correlation_id`; unhandled errors return the root exception message, and `Diagnostics__IncludeExceptionDetails` controls whether they also include `stack_trace`. Responses never expose vectors, raw identity subjects, member presence cells, block direction, provider payloads, or moderation detail.
 
 ## Match execution and feedback
 

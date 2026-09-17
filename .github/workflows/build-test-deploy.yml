@@ -137,11 +137,13 @@ jobs:
         run: |
           image_ref="${ACR_LOGIN_SERVER}/${IMAGE_NAME}@${IMAGE_DIGEST}"
           revision_suffix="${GITHUB_SHA:0:8}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          include_exception_details=false
+          [[ "$DEPLOY_ENVIRONMENT" == "dev" ]] && include_exception_details=true
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$image_ref" \
-            --set-env-vars Hosting__AzureContainerAppsIngress=true \
+            --set-env-vars Hosting__AzureContainerAppsIngress=true "Diagnostics__IncludeExceptionDetails=$include_exception_details" \
             --revision-suffix "$revision_suffix" \
             --output none
           az containerapp ingress update \

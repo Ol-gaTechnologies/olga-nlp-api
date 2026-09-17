@@ -62,7 +62,7 @@ All WANT and OFFER vectors in a comparison must use the same active model versio
 
 ## API contracts
 
-All endpoints are anonymous for the initial MVP. Member-scoped endpoints use the optional `X-Member-Id` header and otherwise fall back to `Mvp__DefaultMemberId` (`A123` by default). Do not treat this selector as authentication; restore verified caller and evaluator identities before exposing sensitive data beyond the controlled MVP environment.
+All endpoints are anonymous for the initial MVP. Member-scoped endpoints use the optional `X-Member-Id` header and otherwise fall back to `Mvp__DefaultMemberId` (`A123` by default). Do not treat this selector as authentication; restore verified caller and evaluator identities before exposing sensitive data beyond the controlled MVP environment. Member IDs are limited to 64 characters and are supplied by the identity lifecycle rather than invented by clients.
 
 - `POST /v1/intents`
 - `GET /v1/intents/{intentId}`
@@ -78,7 +78,17 @@ All endpoints are anonymous for the initial MVP. Member-scoped endpoints use the
 - `GET /health`
 - `GET /ready`
 
-Externally retryable mutations use `Idempotency-Key`. Intent updates use `If-Match`/ETag. Errors contain `code`, `message`, and `correlation_id`; unhandled errors return the root exception message, and `Diagnostics__IncludeExceptionDetails` controls whether they also include `stack_trace`. Responses never expose vectors, raw identity subjects, member presence cells, block direction, provider payloads, or moderation detail.
+Swagger displays each applicable client header:
+
+| Header | Applies to | Client behavior |
+| --- | --- | --- |
+| `X-Member-Id` | Intent, match-request, search, and feedback operations | Optional only because the MVP falls back to `Mvp__DefaultMemberId`; maximum 64 characters. Replace this selector with a validated JWT identity before production use. |
+| `Idempotency-Key` | Stateful `POST` operations | Required, maximum 128 characters. Generate a UUID for each new logical action and reuse it for retries. For match requests and the legacy search endpoint, it must equal `request_id`. |
+| `If-Match` | `POST /v1/intents` | Send the ETag returned by `GET /v1/intents/{intentId}` when updating an existing intent; omit it only when creating the intent. |
+
+Errors contain `code`, `message`, and `correlation_id`; unhandled errors return the root exception message in every environment, and `Diagnostics__IncludeExceptionDetails` controls whether they also include `stack_trace`. Foreign-key failures return `RESOURCE_REFERENCE_NOT_FOUND` instead of an unhandled database error. Responses never expose vectors, raw identity subjects, member presence cells, block direction, provider payloads, or moderation detail.
+
+The current middleware requires `Idempotency-Key` consistently, but durable same-key/same-result replay is complete only for match requests and evaluation runs. Intent and feedback replay storage remains production-readiness work. Internal evaluation endpoints are protected by internal Container Apps ingress only; workload identity and evaluator authorization remain required before production use.
 
 ## Match execution and feedback
 
